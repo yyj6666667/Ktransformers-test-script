@@ -7,9 +7,18 @@ set -euo pipefail
 
 APPIMAGE_URL="https://jcycdn.com/update/SGLang-f6adb4f-kt379b9df-x86_64.AppImage"
 APPIMAGE_NAME="SGLang-f6adb4f-kt379b9df-x86_64.AppImage"
-MODEL_REPO="Qwen/Qwen2.5-7B-Instruct"
-MODEL_NAME="Qwen2.5-7B-Instruct"
 MODELS_BASE="/mnt/data/models"
+
+declare -a MODEL_LIST=(
+    "Qwen2.5-7B-Instruct|Qwen/Qwen2.5-7B-Instruct"
+    "Qwen3-30B-A3B-Instruct-2507|Qwen/Qwen3-30B-A3B-Instruct-2507"
+    "Qwen3.5-122B-A10B-FP8|Qwen/Qwen3.5-122B-A10B-FP8"
+    "Qwen3.5-35B-A3B-FP8|Qwen/Qwen3.5-35B-A3B-FP8"
+    "Qwen3.5-FP8|Qwen/Qwen3.5-397B-A17B-FP8"
+    "Qwen3-Coder-Next|Qwen/Qwen3-Coder-Next"
+    "Qwen3-Coder-Next-FP8|Qwen/Qwen3-Coder-Next-FP8"
+    "MiniMax-M2.5|MiniMaxAI/MiniMax-M2.5"
+)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -48,21 +57,7 @@ fi
 chmod +x "$SCRIPT_DIR/$APPIMAGE_NAME"
 
 # ============================================================================
-# Step 4: Download model from HuggingFace
-# ============================================================================
-
-log "Downloading model: $MODEL_REPO -> $MODELS_BASE/$MODEL_NAME"
-if [ -d "$MODELS_BASE/$MODEL_NAME" ] && [ -f "$MODELS_BASE/$MODEL_NAME/config.json" ]; then
-    ok "Already exists: $MODELS_BASE/$MODEL_NAME (skipping)"
-else
-    huggingface-cli download "$MODEL_REPO" \
-        --local-dir "$MODELS_BASE/$MODEL_NAME" \
-        --local-dir-use-symlinks False
-    ok "Downloaded: $MODEL_REPO"
-fi
-
-# ============================================================================
-# Step 5: Generate benchmark_all_models.py
+# Step 4: Generate benchmark_all_models.py
 # ============================================================================
 
 BENCH_SCRIPT="$SCRIPT_DIR/benchmark_all_models.py"
@@ -283,22 +278,6 @@ def get_model_configs():
         "disable-shared-experts-fusion": True,
     }))
 
-    # 1T MoE (384 experts, 8 active, 1 shared), MLA attention, RAWINT4 weights
-    C.append(("Kimi-K2.5", "Kimi-K2.5", {
-        "model": f"{MODELS_BASE}/Kimi-K2.5",
-        "kt-weight-path": f"{MODELS_BASE}/Kimi-K2.5",
-        "kt-cpuinfer": 16, "kt-threadpool-count": 1,
-        "kt-num-gpu-experts": 2, "kt-method": "RAWINT4",
-        "kt-gpu-prefill-token-threshold": 2048,
-        "kt-max-deferred-experts-per-token": 1,
-        "attention-backend": "flashinfer",
-        "trust-remote-code": True, "mem-fraction-static": 0.85,
-        "chunked-prefill-size": 16384, "max-running-requests": 1,
-        "max-total-tokens": 32000,
-        "enable-mixed-chunk": True, "tensor-parallel-size": 1,
-        "disable-shared-experts-fusion": True,
-        "kt-enable-dynamic-expert-update": True,
-    }))
 
     return C
 
@@ -1019,17 +998,38 @@ PYTHON_SCRIPT_EOF
 ok "benchmark_all_models.py generated"
 
 # ============================================================================
-# Step 6: Run benchmark (first model only)
+# Step 5: Download, benchmark, and delete each model one by one
 # ============================================================================
 
-log "Starting benchmark for $MODEL_NAME"
-echo "    AppImage:  $SCRIPT_DIR/$APPIMAGE_NAME"
-echo "    Model:     $MODELS_BASE/$MODEL_NAME"
-echo "    Results:   $SCRIPT_DIR/perf/perf.csv"
-echo ""
-
 export APPIMAGE_EXTRACT_AND_RUN=1
+TOTAL=${#MODEL_LIST[@]}
+IDX=0
 
-python3 "$SCRIPT_DIR/benchmark_all_models.py" \
-    --models-base "$MODELS_BASE" \
-    "$MODEL_NAME"
+for entry in "${MODEL_LIST[@]}"; do
+    IFS='|' read -r M_NAME M_REPO <<< "$entry"
+    IDX=$((IDX + 1))
+
+    log "[$IDX/$TOTAL] Processing model: $M_NAME"
+
+    # --- Download ---
+    log "Downloading: $M_REPO -> $MODELS_BASE/$M_NAME"
+    huggingface-cli download "$M_REPO" \
+        --local-dir "$MODELS_BASE/$M_NAME" \
+        --local-dir-use-symlinks False
+
+    # --- Benchmark ---
+    log "Benchmarking: $M_NAME"
+    echo "    AppImage:  $SCRIPT_DIR/$APPIMAGE_NAME"
+    echo "    Model:     $MODELS_BASE/$M_NAME"
+    echo "    Results:   $SCRIPT_DIR/perf/perf.csv"
+    echo ""
+    python3 "$SCRIPT_DIR/benchmark_all_models.py" \
+        --models-base "$MODELS_BASE" \
+        "$M_NAME" || true
+
+    # --- Delete ---
+    log "Deleting model: $MODELS_BASE/$M_NAME"
+    rm -rf "$MODELS_BASE/$M_NAME"
+
+    ok "[$IDX/$TOTAL] $M_NAME done"
+done
