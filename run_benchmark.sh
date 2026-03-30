@@ -10,15 +10,14 @@ APPIMAGE_NAME="SGLang-f6adb4f-kt379b9df-x86_64.AppImage"
 MODELS_BASE="/mnt/data/models"
 
 declare -a MODEL_LIST=(
-    "Qwen2.5-7B-Instruct|Qwen/Qwen2.5-7B-Instruct"
-    "Qwen3-30B-A3B-Instruct-2507|Qwen/Qwen3-30B-A3B-Instruct-2507"
+##   "Qwen3-30B-A3B-Instruct-2507|Qwen/Qwen3-30B-A3B-Instruct-2507"
     "Qwen3.5-122B-A10B-FP8|Qwen/Qwen3.5-122B-A10B-FP8"
     "Qwen3.5-35B-A3B-FP8|Qwen/Qwen3.5-35B-A3B-FP8"
-    "Qwen3.5-FP8|Qwen/Qwen3.5-397B-A17B-FP8"
+ #   "Qwen3.5-FP8|Qwen/Qwen3.5-397B-A17B-FP8"
     "Qwen3-Coder-Next|Qwen/Qwen3-Coder-Next"
     "Qwen3-Coder-Next-FP8|Qwen/Qwen3-Coder-Next-FP8"
     "MiniMax-M2.5|MiniMaxAI/MiniMax-M2.5"
-    "Kimi-K2.5|MoonshotAI/Kimi-K2.5"
+
 )
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -279,6 +278,8 @@ def get_model_configs():
         "enable-mixed-chunk": True, "tensor-parallel-size": 1,
         "disable-shared-experts-fusion": True,
     }))
+
+
 
     return C
 
