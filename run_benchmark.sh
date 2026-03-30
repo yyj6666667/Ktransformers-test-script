@@ -18,6 +18,7 @@ declare -a MODEL_LIST=(
     "Qwen3-Coder-Next|Qwen/Qwen3-Coder-Next"
     "Qwen3-Coder-Next-FP8|Qwen/Qwen3-Coder-Next-FP8"
     "MiniMax-M2.5|MiniMaxAI/MiniMax-M2.5"
+    "Kimi-K2.5|MoonshotAI/Kimi-K2.5"
 )
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -109,6 +110,7 @@ import threading
 import traceback
 import platform
 import json
+import re
 from datetime import datetime
 
 # ============================================================================
@@ -175,7 +177,7 @@ def get_model_configs():
         "model": f"{MODELS_BASE}/Qwen3-30B-A3B-Instruct-2507",
         "kt-weight-path": f"{MODELS_BASE}/Qwen3-30B-A3B-Instruct-2507",
         "kt-cpuinfer": 16, "kt-threadpool-count": 1,
-        "kt-num-gpu-experts": 2, "kt-method": "BF16",
+        "kt-num-gpu-experts": 28, "kt-method": "BF16",
         "attention-backend": "triton",
         "trust-remote-code": True, "mem-fraction-static": 0.85,
         "chunked-prefill-size": 4096, "max-running-requests": 1,
@@ -188,7 +190,7 @@ def get_model_configs():
         "model": f"{MODELS_BASE}/Qwen3.5-122B-A10B-FP8",
         "kt-weight-path": f"{MODELS_BASE}/Qwen3.5-122B-A10B-FP8",
         "kt-cpuinfer": 16, "kt-threadpool-count": 1,
-        "kt-num-gpu-experts": 2, "kt-method": "FP8",
+        "kt-num-gpu-experts": 24, "kt-method": "FP8",
         "kt-gpu-prefill-token-threshold": 2048,
         "attention-backend": "triton",
         "fp8-gemm-backend": "cutlass",
@@ -203,7 +205,7 @@ def get_model_configs():
         "model": f"{MODELS_BASE}/Qwen3.5-35B-A3B-FP8",
         "kt-weight-path": f"{MODELS_BASE}/Qwen3.5-35B-A3B-FP8",
         "kt-cpuinfer": 16, "kt-threadpool-count": 1,
-        "kt-num-gpu-experts": 2, "kt-method": "FP8",
+        "kt-num-gpu-experts": 64, "kt-method": "FP8",
         "kt-gpu-prefill-token-threshold": 400,
         "attention-backend": "triton",
         "fp8-gemm-backend": "cutlass",
@@ -219,7 +221,7 @@ def get_model_configs():
         "model": f"{MODELS_BASE}/Qwen3.5-FP8",
         "kt-weight-path": f"{MODELS_BASE}/Qwen3.5-FP8",
         "kt-cpuinfer": 16, "kt-threadpool-count": 1,
-        "kt-num-gpu-experts": 1, "kt-method": "FP8",
+        "kt-num-gpu-experts": 8, "kt-method": "FP8",
         "kt-gpu-prefill-token-threshold": 2048,
         "attention-backend": "triton",
         "fp8-gemm-backend": "cutlass",
@@ -266,7 +268,7 @@ def get_model_configs():
         "model": f"{MODELS_BASE}/MiniMax-M2.5",
         "kt-weight-path": f"{MODELS_BASE}/MiniMax-M2.5",
         "kt-cpuinfer": 16, "kt-threadpool-count": 1,
-        "kt-num-gpu-experts": 2, "kt-method": "FP8",
+        "kt-num-gpu-experts": 8, "kt-method": "FP8",
         "kt-max-deferred-experts-per-token": 0,
         "kt-expert-placement-strategy": "uniform",
         "attention-backend": "flashinfer",
@@ -278,6 +280,22 @@ def get_model_configs():
         "disable-shared-experts-fusion": True,
     }))
 
+    # 1T MoE (384 experts, 8 active, 1 shared), MLA attention, RAWINT4 weights
+    C.append(("Kimi-K2.5", "Kimi-K2.5", {
+        "model": f"{MODELS_BASE}/Kimi-K2.5",
+        "kt-weight-path": f"{MODELS_BASE}/Kimi-K2.5",
+        "kt-cpuinfer": 16, "kt-threadpool-count": 1,
+        "kt-num-gpu-experts": 4, "kt-method": "RAWINT4",
+        "kt-gpu-prefill-token-threshold": 2048,
+        "kt-max-deferred-experts-per-token": 1,
+        "attention-backend": "flashinfer",
+        "trust-remote-code": True, "mem-fraction-static": 0.85,
+        "chunked-prefill-size": 16384, "max-running-requests": 1,
+        "max-total-tokens": 32000,
+        "enable-mixed-chunk": True, "tensor-parallel-size": 1,
+        "disable-shared-experts-fusion": True,
+        "kt-enable-dynamic-expert-update": True,
+    }))
 
     return C
 
@@ -503,6 +521,57 @@ def wait_for_server(port, timeout=SERVER_STARTUP_TIMEOUT):
     return False
 
 
+def print_runtime_server_config(port, log_path, log_file_handle=None):
+    """Print resolved server config via HTTP and KT fields from server_args log line."""
+    base = f"http://localhost:{port}"
+    print("\n  --- Runtime server configuration (HTTP) ---")
+    got_http = False
+    for path in ("/server_info", "/get_server_info"):
+        try:
+            r = requests.get(f"{base}{path}", timeout=15)
+            if r.status_code == 404:
+                continue
+            r.raise_for_status()
+            got_http = True
+            try:
+                print(json.dumps(r.json(), indent=2, ensure_ascii=False))
+            except json.JSONDecodeError:
+                print(r.text)
+            break
+        except requests.RequestException as exc:
+            print(f"  ({path} failed: {exc})")
+    if not got_http:
+        print("  (no usable server_info response)")
+
+    print("  --- KT-related fields from server log (server_args=...) ---")
+    if log_file_handle is not None:
+        try:
+            log_file_handle.flush()
+        except Exception:
+            pass
+    try:
+        with open(log_path, "r", errors="replace") as lf:
+            lines = lf.readlines()
+    except OSError as exc:
+        print(f"  (could not read log: {exc})")
+        return
+    found = None
+    for line in reversed(lines):
+        if "server_args=ServerArgs(" in line:
+            found = line.strip()
+            break
+    if not found:
+        print("  (no server_args=ServerArgs line in log yet)")
+        return
+    kt_matches = re.findall(r"kt_[a-z_0-9]+=[^,\)]+", found)
+    if kt_matches:
+        for m in sorted(set(kt_matches)):
+            print(f"    {m}")
+    else:
+        print("  (no kt_* fields matched in server_args line)")
+    print("  (full server_args line is in the model log file above)")
+
+
 def kill_server(proc):
     if proc is None:
         return
@@ -550,10 +619,52 @@ def generate_prompt(n_tokens):
     return "Repeat after me: " + _FILLER_WORD * n_tokens
 
 
+def count_prompt_tokens_via_tokenize(port, served_name, prompt, timeout):
+    """Return prompt token count from POST /tokenize (SGLang), or None if unavailable."""
+    base = f"http://localhost:{port}"
+    tmo = min(timeout, 120)
+    candidates = [
+        (f"{base}/tokenize", {"model": served_name, "text": prompt}),
+        (f"{base}/tokenize", {"text": prompt}),
+        (f"{base}/tokenize", {"prompt": prompt}),
+        (f"{base}/v1/tokenize", {"model": served_name, "prompt": prompt}),
+    ]
+
+    def _len_from_obj(data):
+        if data is None:
+            return None
+        if isinstance(data, list):
+            return len(data) if data and isinstance(data[0], int) else None
+        if not isinstance(data, dict):
+            return None
+        for key in ("tokens", "token_ids", "ids", "input_ids"):
+            ids = data.get(key)
+            if isinstance(ids, list) and ids and isinstance(ids[0], int):
+                return len(ids)
+        # OpenAI-style: {"data": [{"tokens": [...]}]}
+        block = data.get("data")
+        if isinstance(block, list) and block:
+            return _len_from_obj(block[0])
+        return None
+
+    for url, body in candidates:
+        try:
+            r = requests.post(url, json=body, timeout=tmo)
+            if r.status_code != 200:
+                continue
+            n = _len_from_obj(r.json())
+            if n is not None:
+                return n
+        except (requests.RequestException, json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return None
+
+
 def run_single_benchmark(port, served_name, prompt, max_tokens, timeout):
     """Send a streaming /v1/completions request and measure TTFT / decode.
 
-    Returns (prefill_tps, decode_tps) or (None, None) on error.
+    Uses stream usage when available; otherwise /tokenize + SSE chunk fallback.
+    Returns (prefill_tps, decode_tps, ttft, topt) or (None, None, None, None).
     """
     url = f"http://localhost:{port}/v1/completions"
     payload = {
@@ -562,10 +673,12 @@ def run_single_benchmark(port, served_name, prompt, max_tokens, timeout):
         "max_tokens": max_tokens,
         "temperature": 0,
         "stream": True,
+        "stream_options": {"include_usage": True},
     }
 
     first_token_time = None
-    output_tokens = 0
+    chunk_decode_count = 0
+    usage_accum = {}
     t_start = time.perf_counter()
 
     try:
@@ -585,14 +698,20 @@ def run_single_benchmark(port, served_name, prompt, max_tokens, timeout):
                     chunk = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
-                choices = chunk.get("choices", [])
-                if not choices:
-                    continue
-                text = choices[0].get("text", "")
-                if text and first_token_time is None:
-                    first_token_time = time.perf_counter()
-                if text:
-                    output_tokens += 1
+
+                u = chunk.get("usage")
+                if isinstance(u, dict):
+                    for k, v in u.items():
+                        if v is not None:
+                            usage_accum[k] = v
+
+                choices = chunk.get("choices") or []
+                if choices:
+                    text = choices[0].get("text", "")
+                    if text and first_token_time is None:
+                        first_token_time = time.perf_counter()
+                    if text:
+                        chunk_decode_count += 1
     except requests.exceptions.RequestException as exc:
         err = str(exc)
         if "CUDA" in err or "OOM" in err or "out of memory" in err.lower():
@@ -605,16 +724,40 @@ def run_single_benchmark(port, served_name, prompt, max_tokens, timeout):
 
     t_end = time.perf_counter()
 
-    if first_token_time is None or output_tokens == 0:
+    if first_token_time is None:
         return None, None, None, None
 
     ttft = first_token_time - t_start
     decode_time = t_end - first_token_time
 
-    prompt_tokens = len(prompt.split())
+    prompt_tokens = usage_accum.get("prompt_tokens")
+    completion_tokens = usage_accum.get("completion_tokens")
+
+    if prompt_tokens is None or prompt_tokens == 0:
+        pt_fb = count_prompt_tokens_via_tokenize(
+            port, served_name, prompt, timeout)
+        if pt_fb is not None and pt_fb > 0:
+            prompt_tokens = pt_fb
+            print("    WARNING: prompt token count from /tokenize "
+                  "(stream usage missing or zero prompt_tokens)")
+        else:
+            prompt_tokens = len(prompt.split())
+            print("    WARNING: prompt token count from whitespace split "
+                  "(no usage / /tokenize failed)")
+
+    used_usage_decode = (
+        completion_tokens is not None and completion_tokens > 0)
+    if not used_usage_decode:
+        completion_tokens = chunk_decode_count
+        if completion_tokens == 0:
+            return None, None, None, None
+        print("    WARNING: decode token count from SSE chunks "
+              "(stream usage missing or zero completion_tokens)")
+
     prefill_tps = prompt_tokens / ttft if ttft > 0 else None
-    decode_tps = output_tokens / decode_time if decode_time > 0 else None
-    topt = (decode_time / output_tokens * 1000) if output_tokens > 0 and decode_time > 0 else None
+    decode_tps = completion_tokens / decode_time if decode_time > 0 else None
+    topt = ((decode_time / completion_tokens * 1000)
+            if completion_tokens > 0 and decode_time > 0 else None)
 
     return prefill_tps, decode_tps, ttft, topt
 
@@ -684,6 +827,15 @@ def save_results_csv(all_results, filepath, hw_info=None):
             writer.writerow([model, "Decode  token/s"] + decodes + repro_vals)
             writer.writerow([model, "TTFT (ms)"] + ttfts + repro_vals)
             writer.writerow([model, "TOPT (ms/tok)"] + topts + repro_vals)
+
+
+def save_results_json(all_results, filepath):
+    """Persist results as JSON for cross-invocation merging."""
+    try:
+        with open(filepath, "w") as f:
+            json.dump(all_results, f, indent=2, default=str)
+    except Exception as e:
+        print(f"  WARNING: Could not save JSON results: {e}")
 
 
 def print_summary_table(all_results):
@@ -834,11 +986,24 @@ def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = os.path.join(RESULTS_DIR, "perf.csv")
+    json_path = os.path.join(RESULTS_DIR, "perf_data.json")
     print(f"  Results will be saved to: {csv_path}")
+
+    # --- Load previous results from JSON sidecar ---
+    current_models = {n for n, _, _ in configs}
+    all_results = []
+    if os.path.exists(json_path):
+        try:
+            with open(json_path) as f:
+                previous = json.load(f)
+            all_results = [r for r in previous if r["model"] not in current_models]
+            if all_results:
+                print(f"  Loaded {len(all_results)} previous model result(s) from {json_path}")
+        except Exception as e:
+            print(f"  WARNING: Could not load previous results: {e}")
 
     # --- Benchmark loop ---
     original_handler = signal.getsignal(signal.SIGINT)
-    all_results = []
 
     for idx, (model_name, served_name, args) in enumerate(configs):
         _skip_current_model = False
@@ -888,6 +1053,7 @@ def main():
                                       "topt": None} for c in BENCH_CONFIGS]
                 all_results.append(result)
                 save_results_csv(all_results, csv_path, hw_info)
+                save_results_json(all_results, json_path)
                 continue
 
             if _skip_current_model:
@@ -897,9 +1063,15 @@ def main():
                                       "topt": None} for c in BENCH_CONFIGS]
                 all_results.append(result)
                 save_results_csv(all_results, csv_path, hw_info)
+                save_results_json(all_results, json_path)
                 continue
 
             print("  Server is ready.")
+            try:
+                log_f.flush()
+            except Exception:
+                pass
+            print_runtime_server_config(port, log_path, log_f)
 
             # Warmup
             print("  Warming up...")
@@ -920,6 +1092,7 @@ def main():
                                       "topt": None} for c in BENCH_CONFIGS]
                 all_results.append(result)
                 save_results_csv(all_results, csv_path, hw_info)
+                save_results_json(all_results, json_path)
                 continue
 
             # Benchmark each config
@@ -978,6 +1151,7 @@ def main():
 
         all_results.append(result)
         save_results_csv(all_results, csv_path, hw_info)
+        save_results_json(all_results, json_path)
         print(f"  Results saved ({len(all_results)}/{len(configs)} models done)")
 
         if idx < len(configs) - 1:
