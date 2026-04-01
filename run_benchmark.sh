@@ -31,9 +31,9 @@ ok()  { echo "    [OK] $*"; }
 # ============================================================================
 
 log "Installing Python dependencies..."
-pip install --quiet requests huggingface_hub 2>/dev/null \
-    || pip install requests huggingface_hub
-ok "requests, huggingface_hub"
+pip install --quiet --upgrade requests "huggingface_hub>=1.0" 2>/dev/null \
+    || pip install --upgrade requests "huggingface_hub>=1.0"
+ok "requests, huggingface_hub (>=1.0)"
 
 # ============================================================================
 # Step 2: Create model directory
@@ -1166,9 +1166,8 @@ for entry in "${MODEL_LIST[@]}"; do
 
     # --- Download ---
     log "Downloading: $M_REPO -> $MODELS_BASE/$M_NAME"
-    huggingface-cli download "$M_REPO" \
-        --local-dir "$MODELS_BASE/$M_NAME" \
-        --local-dir-use-symlinks False
+    hf download "$M_REPO" \
+        --local-dir "$MODELS_BASE/$M_NAME"
 
     # --- Benchmark ---
     log "Benchmarking: $M_NAME"
